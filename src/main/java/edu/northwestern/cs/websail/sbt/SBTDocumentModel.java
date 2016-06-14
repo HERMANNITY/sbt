@@ -10,14 +10,22 @@ import java.io.ObjectOutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Serializable;
 import java.lang.reflect.Method;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.Deque;
 import java.util.Iterator;
 import java.util.Random;
+import java.util.TreeMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.HashMap;
 
 import gnu.trove.iterator.TIntDoubleIterator;
 import gnu.trove.iterator.TIntIterator;
@@ -981,26 +989,153 @@ public class SBTDocumentModel implements Serializable {
 	 * @param outputFile	Where to write the output
 	 * @throws Exception
 	 */
+	@SuppressWarnings({ "unchecked", "rawtypes" })
 	public static void outputWordToTopicFile(String modelFile, String outputFile) throws Exception {
 		BufferedWriter bwOut = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(outputFile), "UTF8"));
 		SBTDocumentModel sbtdm = readModel(modelFile);
-		for(int i=0; i<sbtdm._c._pWord.length; i++) {
+//		for(int i=0; i<sbtdm._c._pWord.length; i++) {
+//			if(sbtdm._c._pWord[i] > 0.0) {
+//				bwOut.write(i + "\t");
+//				TIntDoubleHashMap hm = sbtdm._topicGivenWord[i].getLeafCounts();
+//				TIntDoubleIterator it = hm.iterator();
+//				while(it.hasNext()) {
+//					it.advance();
+//					int wId = it.key();
+//					double val = it.value();
+//					bwOut.write(wId + ":" + val + " ");
+//				}
+//				bwOut.write("\r\n");
+//			}
+//		}
+		SparseBackoffTreeStructure root = sbtdm._struct;
+
+		HashMap<Integer,TreeMap<Integer,Double>> topic =  word_distribute(modelFile);	
+		
+		writingHelper(bwOut, sbtdm, root, 0, topic);
+
+		bwOut.close();
+	}
+	// this function writes json
+	public static void writingHelper(BufferedWriter bwOut, SBTDocumentModel sbtdm, SparseBackoffTreeStructure curr, int indent, HashMap<Integer,TreeMap<Integer,Double>> topic) throws Exception {
+		String ind = "";
+		for (int i = 0; i < indent; i++){
+			ind += "\t";
+		}
+
+		bwOut.write(ind + "{\"name\": " + "\""+ curr._delta + "\"," + "\n");
+		if(curr._children != null){
+			bwOut.write(ind + "\"children\": " + "[\n");
+			int lenOfChildren = curr._children.length;
+			for(int i = 0; i < lenOfChildren - 1; i++){
+				writingHelper(bwOut, sbtdm, curr._children[i], indent + 1, topic);
+				bwOut.write(",\n");
+			}
+			writingHelper(bwOut, sbtdm, curr._children[lenOfChildren - 1], indent + 1, topic);
+			bwOut.write("\n" + ind + "\t]");
+		}
+		// if we reach the second last layer
+		else {
+			bwOut.write(ind + "\"children\": " + "[\n");
+			int len = curr._numLeaves.length;
+			// output the topics
+			int per = 10;
+			for(int j = 0; j < len ; j++){
+				bwOut.write(ind + "\t{\"name\": " + "\""+ curr._delta + "\"");
+				bwOut.write(",\n" + ind + "\t\"children\": " + "[\n");
+				
+				int topNum = j + curr._minGlobalIndex;
+				int idx = 0;
+				for(int k : topic.get(topNum).keySet()){
+					if(idx < per - 1){
+						bwOut.write(ind + "\t\t{\"name\": " + k + "},\n");
+					}
+					else if(idx == per - 1){
+						// deal with last one
+						bwOut.write(ind + "\t\t{\"name\": " + k + "}\n");
+					}
+					else{
+						break;
+					}
+					idx ++;
+				}
+				
+				bwOut.write("\n" + ind + "\t]");
+				if(j < len - 1){
+					bwOut.write("\n" + ind + "\t},\n");
+				}
+				else{
+					bwOut.write("\n" + ind + "\t}\n");
+				}
+			}
+						
+			
+			bwOut.write("\n" + ind + "\t]");
+		}
+		bwOut.write("\n");
+		bwOut.write(ind + "}");
+	}
+	
+	@SuppressWarnings("unchecked")
+	public static  HashMap<Integer,TreeMap<Integer,Double>> word_distribute(String modelFile) throws Exception{
+	// Set up a hash table of the word distribution given topic
+		@SuppressWarnings("rawtypes")
+		HashMap<Integer,HashMap<Integer,Double>> word_givenTopic = new HashMap();
+		SBTDocumentModel sbtdm = readModel(modelFile);
+		for(int i = 0; i < sbtdm._c._pWord.length; i++) {
 			if(sbtdm._c._pWord[i] > 0.0) {
-				bwOut.write(i + "\t");
 				TIntDoubleHashMap hm = sbtdm._topicGivenWord[i].getLeafCounts();
 				TIntDoubleIterator it = hm.iterator();
 				while(it.hasNext()) {
 					it.advance();
 					int wId = it.key();
 					double val = it.value();
-					bwOut.write(wId + ":" + val + " ");
+					if(word_givenTopic.containsKey(wId)){
+                        HashMap<Integer,Double> sublist = word_givenTopic.get(wId);
+                        sublist.put(i,val);
+					}else{
+						@SuppressWarnings("rawtypes")
+						HashMap<Integer,Double> sublist = new HashMap();
+						sublist.put(i,val);
+						word_givenTopic.put(wId,sublist);
+					}
 				}
-				bwOut.write("\r\n");
 			}
 		}
-		bwOut.close();
-	}
-	
+
+	//sort the hash map by value.
+	@SuppressWarnings("rawtypes")
+	HashMap<Integer,TreeMap<Integer,Double>> final_result = new HashMap();
+	for(Entry<Integer, HashMap<Integer, Double>> entry : word_givenTopic.entrySet()) {
+			int key = entry.getKey();
+    		HashMap<Integer,Double> word_distribution = entry.getValue();
+    		ByValueComparator bvc = new ByValueComparator(word_distribution);
+    		TreeMap<Integer, Double> sorted_word_distribution = new TreeMap<Integer, Double>(bvc);
+            sorted_word_distribution.putAll(word_distribution);
+            final_result.put(key,sorted_word_distribution);
+    }    
+    return final_result;
+}
+static class ByValueComparator implements Comparator<Integer> {
+    HashMap<Integer, Double> base_map;
+    
+    public ByValueComparator(HashMap<Integer, Double>  base_map) {
+        this.base_map = base_map;
+    }
+
+    public int compare(Integer arg0, Integer arg1) {
+        if (!base_map.containsKey(arg0) || !base_map.containsKey(arg1)) {
+            return 0;
+        }
+
+        if (base_map.get(arg0) < base_map.get(arg1)) {
+            return 1;
+        } else if (base_map.get(arg0) == base_map.get(arg1)) {
+            return 0;
+        } else {
+            return -1;
+        }
+    }
+}
 	public static void main(String[] args) throws Exception {
 		if(args.length > 0 && args[0].equalsIgnoreCase("train")) {
 			if(args.length != 4) {
